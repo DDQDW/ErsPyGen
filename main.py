@@ -22,14 +22,40 @@ except ImportError:
     fph = None
 
 DOWNLOAD_DIR = "/storage/emulated/0/Download"
-ASSETS_DIR = os.path.join(os.path.dirname(__file__), "assets")
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+ASSETS_DIR = os.path.join(APP_DIR, "assets")
+FALLBACK_DIR = os.path.join(APP_DIR, "generated_docs")
 FONT_PATH = os.path.join(ASSETS_DIR, "DejaVuSans.ttf")
+GENERATED_EXTENSIONS = (".docx", ".pptx", ".xlsx", ".pdf", ".txt", ".md", ".html", ".csv", ".json")
+
+# Thread-local or shared registry of files produced during an action
+_created_files_lock = threading.Lock()
+_recent_created_files = []
 
 
-def ensure_download_dir():
-    if not os.path.exists(DOWNLOAD_DIR):
+def _record_created_file(filename, data_bytes, saved_path, in_downloads):
+    with _created_files_lock:
+        _recent_created_files.append(
+            {
+                "filename": filename,
+                "bytes": data_bytes,
+                "path": saved_path,
+                "in_downloads": in_downloads,
+            }
+        )
+
+
+def _pop_recent_created_files():
+    with _created_files_lock:
+        items = list(_recent_created_files)
+        _recent_created_files.clear()
+        return items
+
+
+def ensure_dir(path_dir):
+    if not os.path.exists(path_dir):
         try:
-            os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+            os.makedirs(path_dir, exist_ok=True)
         except Exception:
             pass
 
@@ -42,20 +68,46 @@ def parse_csv(csv_string):
 
 
 def save_file_to_download(filename, content_bytes_or_path, is_binary=True):
-    ensure_download_dir()
     safe_name = os.path.basename(str(filename).strip()) or "document"
-    full_path = os.path.join(DOWNLOAD_DIR, safe_name)
     if is_binary:
-        data = (
-            content_bytes_or_path
+        data_bytes = (
+            bytes(content_bytes_or_path)
             if isinstance(content_bytes_or_path, (bytes, bytearray))
             else str(content_bytes_or_path).encode("utf-8")
         )
-        with open(full_path, "wb") as f:
-            f.write(data)
     else:
-        shutil.copy(content_bytes_or_path, full_path)
-    return full_path
+        with open(content_bytes_or_path, "rb") as f:
+            data_bytes = f.read()
+
+    # Try direct write to Android public Download folder first
+    in_downloads = False
+    saved_path = None
+    try:
+        ensure_dir(DOWNLOAD_DIR)
+        candidate = os.path.join(DOWNLOAD_DIR, safe_name)
+        with open(candidate, "wb") as f:
+            f.write(data_bytes)
+        saved_path = candidate
+        in_downloads = True
+    except Exception:
+        ensure_dir(FALLBACK_DIR)
+        candidate = os.path.join(FALLBACK_DIR, safe_name)
+        with open(candidate, "wb") as f:
+            f.write(data_bytes)
+        saved_path = candidate
+        in_downloads = False
+
+    _record_created_file(safe_name, data_bytes, saved_path, in_downloads)
+    return saved_path
+
+
+def _format_save_message(filename, saved_path, in_downloads):
+    if in_downloads:
+        return f"Файл {filename} сохранен в Download ({saved_path})"
+    return (
+        f"Файл {filename} создан во внутренней папке ({saved_path}). "
+        "Нет доступа к Download — нажмите «Сохранить в Загрузки» ниже."
+    )
 
 
 def _escape_csv_cell(value):
@@ -205,11 +257,11 @@ def create_docx(title, text, list_items, table_csv, filename):
                 for j, cell_value in enumerate(row):
                     if j < cols:
                         table.cell(i, j).text = str(cell_value)
-    temp_path = os.path.join(os.path.dirname(__file__), os.path.basename(filename))
-    doc.save(temp_path)
-    save_file_to_download(filename, temp_path, is_binary=False)
-    os.remove(temp_path)
-    return f"Файл {filename} сохранен в Downloads"
+    buf = io.BytesIO()
+    doc.save(buf)
+    saved_path = save_file_to_download(filename, buf.getvalue(), is_binary=True)
+    in_dl = saved_path.startswith(DOWNLOAD_DIR)
+    return _format_save_message(os.path.basename(saved_path), saved_path, in_dl)
 
 
 def create_pptx(title, text, list_items, filename):
@@ -226,11 +278,11 @@ def create_pptx(title, text, list_items, filename):
                 p = tf.add_paragraph()
                 p.text = item.strip()
                 p.level = 1
-    temp_path = os.path.join(os.path.dirname(__file__), os.path.basename(filename))
-    prs.save(temp_path)
-    save_file_to_download(filename, temp_path, is_binary=False)
-    os.remove(temp_path)
-    return f"Файл {filename} сохранен в Downloads"
+    buf = io.BytesIO()
+    prs.save(buf)
+    saved_path = save_file_to_download(filename, buf.getvalue(), is_binary=True)
+    in_dl = saved_path.startswith(DOWNLOAD_DIR)
+    return _format_save_message(os.path.basename(saved_path), saved_path, in_dl)
 
 
 def create_xlsx(table_csv, filename):
@@ -245,11 +297,11 @@ def create_xlsx(table_csv, filename):
             cell.alignment = Alignment(wrap_text=True)
             if i == 0:
                 cell.font = Font(bold=True)
-    temp_path = os.path.join(os.path.dirname(__file__), os.path.basename(filename))
-    wb.save(temp_path)
-    save_file_to_download(filename, temp_path, is_binary=False)
-    os.remove(temp_path)
-    return f"Файл {filename} сохранен в Downloads"
+    buf = io.BytesIO()
+    wb.save(buf)
+    saved_path = save_file_to_download(filename, buf.getvalue(), is_binary=True)
+    in_dl = saved_path.startswith(DOWNLOAD_DIR)
+    return _format_save_message(os.path.basename(saved_path), saved_path, in_dl)
 
 
 def _is_valid_ttf(font_path):
@@ -279,11 +331,10 @@ def create_pdf(title, text, list_items, filename):
         for item in str(list_items).splitlines():
             if item.strip():
                 pdf.multi_cell(0, 8, f"• {item.strip()}")
-    temp_path = os.path.join(os.path.dirname(__file__), os.path.basename(filename))
-    pdf.output(temp_path)
-    save_file_to_download(filename, temp_path, is_binary=False)
-    os.remove(temp_path)
-    return f"Файл {filename} сохранен в Downloads"
+    pdf_bytes = bytes(pdf.output())
+    saved_path = save_file_to_download(filename, pdf_bytes, is_binary=True)
+    in_dl = saved_path.startswith(DOWNLOAD_DIR)
+    return _format_save_message(os.path.basename(saved_path), saved_path, in_dl)
 
 
 def create_txt(title, text, list_items, table_csv, filename):
@@ -303,8 +354,9 @@ def create_txt(title, text, list_items, table_csv, filename):
     for row in parse_csv(table_csv):
         parts.append("\t|\t".join(row))
     content = "\n".join(parts).strip() + "\n"
-    save_file_to_download(filename, content.encode("utf-8"), is_binary=True)
-    return f"Файл {filename} сохранен в Downloads"
+    saved_path = save_file_to_download(filename, content.encode("utf-8"), is_binary=True)
+    in_dl = saved_path.startswith(DOWNLOAD_DIR)
+    return _format_save_message(os.path.basename(saved_path), saved_path, in_dl)
 
 
 def create_md(title, text, list_items, table_csv, filename):
@@ -327,8 +379,9 @@ def create_md(title, text, list_items, table_csv, filename):
             padded = [row[i] if i < len(row) else "" for i in range(cols)]
             parts.append("| " + " | ".join(padded) + " |")
     content = "\n".join(parts).strip() + "\n"
-    save_file_to_download(filename, content.encode("utf-8"), is_binary=True)
-    return f"Файл {filename} сохранен в Downloads"
+    saved_path = save_file_to_download(filename, content.encode("utf-8"), is_binary=True)
+    in_dl = saved_path.startswith(DOWNLOAD_DIR)
+    return _format_save_message(os.path.basename(saved_path), saved_path, in_dl)
 
 
 def create_html(title, text, list_items, table_csv, filename):
@@ -364,8 +417,9 @@ def create_html(title, text, list_items, table_csv, filename):
         f"table{{border-collapse:collapse;width:100%}}th,td{{border:1px solid #ccc;padding:6px 8px}}</style>"
         f"</head><body>{''.join(sections)}</body></html>"
     )
-    save_file_to_download(filename, doc_html.encode("utf-8"), is_binary=True)
-    return f"Файл {filename} сохранен в Downloads"
+    saved_path = save_file_to_download(filename, doc_html.encode("utf-8"), is_binary=True)
+    in_dl = saved_path.startswith(DOWNLOAD_DIR)
+    return _format_save_message(os.path.basename(saved_path), saved_path, in_dl)
 
 
 def create_from_text(raw_text, fmt="docx", filename="layout"):
@@ -389,9 +443,28 @@ def create_from_text(raw_text, fmt="docx", filename="layout"):
     raise ValueError(f"Неизвестный формат: {fmt}")
 
 
-def execute_user_script(code, log_output):
+def _snapshot_dir(target_dir):
+    snap = {}
+    try:
+        for name in os.listdir(target_dir):
+            full = os.path.join(target_dir, name)
+            if os.path.isfile(full):
+                st = os.stat(full)
+                snap[full] = (st.st_mtime_ns, st.st_size)
+    except Exception:
+        pass
+    return snap
+
+
+def execute_user_script(code, log_output, on_files_ready=None):
     def run():
         old_stdout = sys.stdout
+        _pop_recent_created_files()
+        watch_dirs = list(dict.fromkeys([os.getcwd(), APP_DIR, DOWNLOAD_DIR]))
+        before = {}
+        for d in watch_dirs:
+            before.update(_snapshot_dir(d))
+
         try:
             namespace = {
                 "create_docx": create_docx,
@@ -404,6 +477,7 @@ def execute_user_script(code, log_output):
                 "create_from_text": create_from_text,
                 "parse_layout": parse_layout_from_text,
                 "save_file_to_download": save_file_to_download,
+                "DOWNLOAD_DIR": DOWNLOAD_DIR,
                 "os": os,
                 "print": lambda *args: log_output(f"[PRINT] {' '.join(map(str, args))}"),
             }
@@ -412,6 +486,45 @@ def execute_user_script(code, log_output):
             output = sys.stdout.getvalue()
             if output:
                 log_output(f"Вывод скрипта:\n{output}")
+
+            # Detect files created directly by user scripts (e.g., doc.save("file.docx"))
+            recorded = _pop_recent_created_files()
+            recorded_names = {item["filename"] for item in recorded}
+
+            for d in watch_dirs:
+                for full_path, stat_val in _snapshot_dir(d).items():
+                    if full_path not in before or before[full_path] != stat_val:
+                        fname = os.path.basename(full_path)
+                        if fname.lower().endswith(GENERATED_EXTENSIONS) and fname not in recorded_names:
+                            if d == DOWNLOAD_DIR:
+                                with open(full_path, "rb") as fp:
+                                    data = fp.read()
+                                recorded.append(
+                                    {
+                                        "filename": fname,
+                                        "bytes": data,
+                                        "path": full_path,
+                                        "in_downloads": True,
+                                    }
+                                )
+                            else:
+                                # Copy from private app working dir to Download (or fallback)
+                                save_file_to_download(fname, full_path, is_binary=False)
+                                recorded.extend(_pop_recent_created_files())
+                            recorded_names.add(fname)
+
+            for item in recorded:
+                if item["in_downloads"]:
+                    log_output(f"📁 Сохранено в Download: {item['path']}")
+                else:
+                    log_output(
+                        f"⚠️ Сохранено во внутреннюю память ({item['path']}). "
+                        f"Нажмите «Сохранить {item['filename']} в Загрузки» ниже."
+                    )
+
+            if on_files_ready and recorded:
+                on_files_ready(recorded)
+
             log_output("✅ Скрипт выполнен успешно.")
         except Exception as e:
             log_output(f"❌ Ошибка: {e}\n{traceback.format_exc()}")
@@ -421,10 +534,40 @@ def execute_user_script(code, log_output):
     threading.Thread(target=run, daemon=True).start()
 
 
+PRIMARY_COLOR = "#1976d2"
+SURFACE_COLOR = "#ffffff"
+BORDER_COLOR = "#c4c7c5"
+DIVIDER_COLOR = "#e0e2e0"
+TEXT_COLOR = "#1f1f1f"
+MUTED_COLOR = "#5f6368"
+BTN_BG = "#f0f4fa"
+LOG_BG = "#f6f8fa"
+DROPZONE_BG = "#fafbfc"
+
+SAMPLE_LAYOUT_TEXT = """# Отчет по проекту DocBuilder
+TITLE: Отчет по проекту DocBuilder
+
+Ниже приведены ключевые результаты работы и сводная таблица показателей.
+
+## Основные задачи
+- Поддержка верстки из текстовых файлов (.txt, .md, .json, .csv)
+- Экспорт в Word, PowerPoint, Excel, PDF, Markdown и HTML
+- Выполнение пользовательских скриптов
+
+## Сводная таблица
+| Модуль | Статус | Формат |
+| --- | --- | --- |
+| Шаблоны | Готово | DOCX/PPTX/XLSX/PDF |
+| Текстовая верстка | Готово | TXT/MD/JSON/CSV |
+| Скрипты | Готово | Python/JS |"""
+
+
 def main(page: ft.Page):
     page.title = "DocBuilder Mobile"
     page.theme_mode = ft.ThemeMode.LIGHT
-    page.scroll = ft.ScrollMode.ADAPTIVE
+    page.theme = ft.Theme(color_scheme_seed=PRIMARY_COLOR)
+    page.bgcolor = SURFACE_COLOR
+    page.padding = 0
 
     ph = fph.PermissionHandler() if fph is not None else None
     if ph is not None:
@@ -433,11 +576,66 @@ def main(page: ft.Page):
     file_picker = ft.FilePicker()
     page.services.append(file_picker)
 
-    script_log = ft.Text("", selectable=True, size=12)
-    layout_log = ft.Text("", selectable=True, size=12)
+    def make_field(label, **kwargs):
+        return ft.TextField(
+            label=label,
+            bgcolor=SURFACE_COLOR,
+            border_color=BORDER_COLOR,
+            focused_border_color=PRIMARY_COLOR,
+            border_radius=6,
+            text_size=14,
+            content_padding=ft.Padding.symmetric(horizontal=12, vertical=10),
+            **kwargs,
+        )
+
+    def make_elevated_btn(text, on_click):
+        return ft.Button(
+            content=text,
+            on_click=on_click,
+            bgcolor=BTN_BG,
+            color=PRIMARY_COLOR,
+        )
+
+    def make_outlined_btn(text, on_click):
+        return ft.OutlinedButton(
+            content=text,
+            on_click=on_click,
+        )
+
+    script_log = ft.Text("", selectable=True, size=12, color=TEXT_COLOR)
+    layout_log = ft.Text("", selectable=True, size=12, color=TEXT_COLOR)
+    doc_save_buttons = ft.Row(controls=[], wrap=True, spacing=8, run_spacing=8)
+    layout_save_buttons = ft.Row(controls=[], wrap=True, spacing=8, run_spacing=8)
+    script_save_buttons = ft.Row(controls=[], wrap=True, spacing=8, run_spacing=8)
 
     def show_snack(msg):
         page.show_dialog(ft.SnackBar(ft.Text(msg)))
+
+    def make_export_button(item):
+        async def on_save_click(e):
+            try:
+                saved = await file_picker.save_file(
+                    dialog_title="Сохранить документ",
+                    file_name=item["filename"],
+                    src_bytes=item["bytes"],
+                )
+                if saved:
+                    show_snack(f"Сохранено: {saved}")
+                else:
+                    show_snack(f"Файл {item['filename']} сохранён через системный диалог.")
+            except Exception as ex:
+                show_snack(f"Ошибка сохранения: {ex}")
+
+        return ft.Button(
+            content=f"Сохранить {item['filename']} в Загрузки",
+            on_click=on_save_click,
+            bgcolor="#eef4fc",
+            color=PRIMARY_COLOR,
+        )
+
+    def populate_save_buttons(row_control, items):
+        row_control.controls = [make_export_button(item) for item in items]
+        page.update()
 
     def log_to_ui(message):
         script_log.value += f"{message}\n"
@@ -459,30 +657,31 @@ def main(page: ft.Page):
                 show_snack("Разрешение получено.")
             else:
                 log_to_ui(f"Статус разрешения: {status}")
-                show_snack("Разрешение не получено. Сохранение может не работать.")
+                show_snack("Разрешение не получено. Используйте кнопку «Сохранить в Загрузки».")
         except Exception as ex:
             log_to_ui(f"Ошибка при запросе разрешения: {ex}")
 
     # Вкладка 1: Шаблоны
-    title_field = ft.TextField(label="Заголовок", hint_text="Введите заголовок документа")
-    text_field = ft.TextField(label="Текст", multiline=True, min_lines=3, max_lines=6)
-    list_field = ft.TextField(
-        label="Список (каждый пункт с новой строки)",
+    title_field = make_field("Заголовок", hint_text="Введите заголовок документа")
+    text_field = make_field("Текст", multiline=True, min_lines=3, max_lines=5)
+    list_field = make_field(
+        "Список (каждый пункт с новой строки)",
         multiline=True,
         min_lines=2,
         max_lines=4,
     )
-    table_field = ft.TextField(
-        label="Таблица (CSV: строки через Enter, колонки через запятую)",
+    table_field = make_field(
+        "Таблица (CSV: строки через Enter, колонки через запятую)",
         multiline=True,
         min_lines=3,
-        max_lines=6,
+        max_lines=5,
     )
-    filename_field = ft.TextField(label="Имя файла (с расширением)", value="document.docx")
+    filename_field = make_field("Имя файла (с расширением)", value="document.docx")
 
     def make_create_handler(format_type):
         def handler(e):
             try:
+                _pop_recent_created_files()
                 fname = filename_field.value.strip()
                 if not fname:
                     raise ValueError("Укажите имя файла.")
@@ -504,52 +703,76 @@ def main(page: ft.Page):
                     res = create_md(t, txt, lst, tbl, fname)
                 else:
                     res = create_txt(t, txt, lst, tbl, fname)
+                populate_save_buttons(doc_save_buttons, _pop_recent_created_files())
                 show_snack(res)
             except Exception as ex:
                 show_snack(f"Ошибка: {ex}")
 
         return handler
 
-    doc_tab = ft.Column(
-        controls=[
-            ft.Text("Создание документа", size=20, weight=ft.FontWeight.BOLD),
-            title_field,
-            text_field,
-            list_field,
-            table_field,
-            filename_field,
-            ft.Row(
-                controls=[
-                    ft.Button(content="Word (.docx)", on_click=make_create_handler("docx")),
-                    ft.Button(content="PowerPoint (.pptx)", on_click=make_create_handler("pptx")),
-                    ft.Button(content="Excel (.xlsx)", on_click=make_create_handler("xlsx")),
-                    ft.Button(content="PDF (.pdf)", on_click=make_create_handler("pdf")),
-                    ft.Button(content="Markdown (.md)", on_click=make_create_handler("md")),
-                    ft.Button(content="Текст (.txt)", on_click=make_create_handler("txt")),
-                ],
-                wrap=True,
-            ),
-            ft.Divider(),
-            ft.Text("Все файлы сохраняются в папку Download.", size=12, color=ft.Colors.GREY),
-            ft.Button(
-                content="Запросить разрешение на запись",
-                on_click=request_storage_permission,
-            ),
-        ],
-        scroll=ft.ScrollMode.ADAPTIVE,
-        spacing=10,
+    doc_tab = ft.Container(
+        padding=ft.Padding.only(left=16, right=16, top=16, bottom=28),
+        expand=True,
+        bgcolor=SURFACE_COLOR,
+        content=ft.Column(
+            controls=[
+                ft.Text("Создание документа", size=20, weight=ft.FontWeight.BOLD, color=TEXT_COLOR),
+                title_field,
+                text_field,
+                list_field,
+                table_field,
+                filename_field,
+                ft.Row(
+                    controls=[
+                        make_elevated_btn("Word (.docx)", make_create_handler("docx")),
+                        make_elevated_btn("PowerPoint (.pptx)", make_create_handler("pptx")),
+                        make_elevated_btn("Excel (.xlsx)", make_create_handler("xlsx")),
+                        make_elevated_btn("PDF (.pdf)", make_create_handler("pdf")),
+                        make_elevated_btn("Markdown (.md)", make_create_handler("md")),
+                        make_elevated_btn("Текст (.txt)", make_create_handler("txt")),
+                    ],
+                    wrap=True,
+                    spacing=8,
+                    run_spacing=8,
+                ),
+                doc_save_buttons,
+                ft.Divider(color=DIVIDER_COLOR, height=1),
+                ft.Text(
+                    "Все файлы сохраняются в папку Download или через кнопку выше.",
+                    size=12,
+                    color="#757575",
+                ),
+                ft.Row(
+                    controls=[
+                        make_elevated_btn("Запросить разрешение на запись", request_storage_permission),
+                    ],
+                    wrap=True,
+                ),
+            ],
+            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+            scroll=ft.ScrollMode.AUTO,
+            expand=True,
+            spacing=12,
+        ),
     )
 
     # Вкладка 2: Верстка из файла
-    layout_content_field = ft.TextField(
-        label="Содержимое текстового файла / разметка",
+    dropzone_title = ft.Text(
+        "Нажмите, чтобы выбрать текстовый файл / скрипт",
+        size=14,
+        weight=ft.FontWeight.W_500,
+        color=TEXT_COLOR,
+        text_align=ft.TextAlign.CENTER,
+    )
+    layout_content_field = make_field(
+        "Содержимое текстового файла / разметка",
         multiline=True,
         min_lines=8,
-        max_lines=16,
+        max_lines=14,
         hint_text="# Заголовок\nТекст\n- Пункт 1\n| A | B |\n| --- | --- |\n| 1 | 2 |",
     )
-    layout_filename_field = ft.TextField(
-        label="Имя выходного файла (без расширения)",
+    layout_filename_field = make_field(
+        "Имя итогового файла (без расширения)",
         value="layout",
     )
     loaded_source_name = {"name": ""}
@@ -565,13 +788,23 @@ def main(page: ft.Page):
                 with open(f.path, "r", encoding="utf-8", errors="replace") as fp:
                     layout_content_field.value = fp.read()
                 loaded_source_name["name"] = f.name
+                dropzone_title.value = f"Загружен файл: {f.name}"
                 layout_filename_field.value = os.path.splitext(f.name)[0] or "layout"
                 layout_log.value = f"Загружен файл: {f.name}\n"
                 page.update()
 
+    def load_sample_layout(e):
+        loaded_source_name["name"] = "example.md"
+        dropzone_title.value = "Загружен файл: example.md"
+        layout_content_field.value = SAMPLE_LAYOUT_TEXT
+        layout_filename_field.value = "report"
+        layout_log.value = "Загружен пример текстовой разметки.\n"
+        page.update()
+
     def make_typeset_handler(fmt):
         def handler(e):
             try:
+                _pop_recent_created_files()
                 raw = layout_content_field.value
                 if not raw or not raw.strip():
                     raise ValueError("Текстовый файл пуст.")
@@ -593,6 +826,7 @@ def main(page: ft.Page):
                 else:
                     res = create_txt(t, txt, lst, tbl, fname)
                 layout_log.value = f"{res}\n"
+                populate_save_buttons(layout_save_buttons, _pop_recent_created_files())
                 show_snack(res)
             except Exception as ex:
                 layout_log.value = f"❌ Ошибка: {ex}\n"
@@ -602,44 +836,96 @@ def main(page: ft.Page):
 
     def run_layout_as_script(e):
         layout_log.value = "Выполнение...\n"
+        layout_save_buttons.controls = []
         page.update()
-        execute_user_script(layout_content_field.value, log_layout)
+        execute_user_script(
+            layout_content_field.value,
+            log_layout,
+            on_files_ready=lambda items: populate_save_buttons(layout_save_buttons, items),
+        )
 
-    layout_tab = ft.Column(
-        controls=[
-            ft.Text("Верстка из текстового файла", size=20, weight=ft.FontWeight.BOLD),
-            ft.Button(
-                content="Выбрать файл (.txt, .md, .py, .json, .csv)",
-                on_click=pick_layout_file,
-            ),
-            layout_content_field,
-            layout_filename_field,
-            ft.Row(
-                controls=[
-                    ft.Button(content="Word (.docx)", on_click=make_typeset_handler("docx")),
-                    ft.Button(content="PDF (.pdf)", on_click=make_typeset_handler("pdf")),
-                    ft.Button(content="PowerPoint (.pptx)", on_click=make_typeset_handler("pptx")),
-                    ft.Button(content="Excel (.xlsx)", on_click=make_typeset_handler("xlsx")),
-                    ft.Button(content="Markdown (.md)", on_click=make_typeset_handler("md")),
-                    ft.Button(content="HTML (.html)", on_click=make_typeset_handler("html")),
-                    ft.Button(content="Текст (.txt)", on_click=make_typeset_handler("txt")),
-                    ft.Button(content="Выполнить как скрипт", on_click=run_layout_as_script),
-                ],
-                wrap=True,
-            ),
-            ft.Divider(),
-            layout_log,
-        ],
-        scroll=ft.ScrollMode.ADAPTIVE,
-        spacing=10,
+    layout_tab = ft.Container(
+        padding=ft.Padding.only(left=16, right=16, top=16, bottom=28),
+        expand=True,
+        bgcolor=SURFACE_COLOR,
+        content=ft.Column(
+            controls=[
+                ft.Text(
+                    "Верстка из текстовых файлов и скриптов",
+                    size=20,
+                    weight=ft.FontWeight.BOLD,
+                    color=TEXT_COLOR,
+                ),
+                ft.Container(
+                    bgcolor=DROPZONE_BG,
+                    border=ft.Border.all(1, BORDER_COLOR),
+                    border_radius=8,
+                    padding=16,
+                    on_click=pick_layout_file,
+                    content=ft.Column(
+                        controls=[
+                            dropzone_title,
+                            ft.Text(
+                                "Поддерживаются: .txt, .md, .py, .js, .json, .csv, .yaml",
+                                size=12,
+                                color=MUTED_COLOR,
+                                text_align=ft.TextAlign.CENTER,
+                            ),
+                        ],
+                        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                        spacing=6,
+                    ),
+                ),
+                ft.Row(
+                    controls=[
+                        make_outlined_btn("Выбрать файл", pick_layout_file),
+                        make_outlined_btn("Загрузить пример разметки", load_sample_layout),
+                    ],
+                    wrap=True,
+                    spacing=8,
+                    run_spacing=8,
+                ),
+                layout_content_field,
+                layout_filename_field,
+                ft.Row(
+                    controls=[
+                        make_elevated_btn("Word (.docx)", make_typeset_handler("docx")),
+                        make_elevated_btn("PDF (.pdf)", make_typeset_handler("pdf")),
+                        make_elevated_btn("PowerPoint (.pptx)", make_typeset_handler("pptx")),
+                        make_elevated_btn("Excel (.xlsx)", make_typeset_handler("xlsx")),
+                        make_elevated_btn("Markdown (.md)", make_typeset_handler("md")),
+                        make_elevated_btn("HTML (.html)", make_typeset_handler("html")),
+                        make_elevated_btn("Текст (.txt)", make_typeset_handler("txt")),
+                        make_outlined_btn("Выполнить как скрипт", run_layout_as_script),
+                    ],
+                    wrap=True,
+                    spacing=8,
+                    run_spacing=8,
+                ),
+                ft.Divider(color=DIVIDER_COLOR, height=1),
+                ft.Text("Результат верстки:", size=14, weight=ft.FontWeight.BOLD, color=TEXT_COLOR),
+                ft.Container(
+                    bgcolor=LOG_BG,
+                    border=ft.Border.all(1, DIVIDER_COLOR),
+                    border_radius=6,
+                    padding=10,
+                    content=layout_log,
+                ),
+                layout_save_buttons,
+            ],
+            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+            scroll=ft.ScrollMode.AUTO,
+            expand=True,
+            spacing=12,
+        ),
     )
 
     # Вкладка 3: Свой скрипт
-    script_code_field = ft.TextField(
-        label="Python-код",
+    script_code_field = make_field(
+        "Python-код",
         multiline=True,
         min_lines=10,
-        max_lines=20,
+        max_lines=18,
         hint_text="Доступны: create_docx, create_pptx, create_xlsx, create_pdf, create_from_text",
         value="# Пример:\n# create_docx('Заголовок', 'Текст', 'Пункт 1\\nПункт 2', 'A,B\\n1,2', 'my.docx')\nprint('Привет из скрипта!')",
     )
@@ -659,26 +945,47 @@ def main(page: ft.Page):
 
     def run_script(e):
         script_log.value = "Выполнение...\n"
+        script_save_buttons.controls = []
         page.update()
-        execute_user_script(script_code_field.value, log_to_ui)
+        execute_user_script(
+            script_code_field.value,
+            log_to_ui,
+            on_files_ready=lambda items: populate_save_buttons(script_save_buttons, items),
+        )
 
-    script_tab = ft.Column(
-        controls=[
-            ft.Text("Свой скрипт", size=20, weight=ft.FontWeight.BOLD),
-            script_code_field,
-            ft.Row(
-                controls=[
-                    ft.Button(content="Выполнить", on_click=run_script),
-                    ft.Button(content="Загрузить файл скрипта", on_click=pick_script_file),
-                ],
-                wrap=True,
-            ),
-            ft.Divider(),
-            ft.Text("Лог выполнения:", weight=ft.FontWeight.BOLD),
-            script_log,
-        ],
-        scroll=ft.ScrollMode.ADAPTIVE,
-        spacing=10,
+    script_tab = ft.Container(
+        padding=ft.Padding.only(left=16, right=16, top=16, bottom=28),
+        expand=True,
+        bgcolor=SURFACE_COLOR,
+        content=ft.Column(
+            controls=[
+                ft.Text("Свой скрипт", size=20, weight=ft.FontWeight.BOLD, color=TEXT_COLOR),
+                script_code_field,
+                ft.Row(
+                    controls=[
+                        make_elevated_btn("Выполнить", run_script),
+                        make_outlined_btn("Загрузить файл скрипта (.txt, .py, .js)", pick_script_file),
+                    ],
+                    wrap=True,
+                    spacing=8,
+                    run_spacing=8,
+                ),
+                ft.Divider(color=DIVIDER_COLOR, height=1),
+                ft.Text("Лог выполнения:", size=14, weight=ft.FontWeight.BOLD, color=TEXT_COLOR),
+                ft.Container(
+                    bgcolor=LOG_BG,
+                    border=ft.Border.all(1, DIVIDER_COLOR),
+                    border_radius=6,
+                    padding=10,
+                    content=script_log,
+                ),
+                script_save_buttons,
+            ],
+            horizontal_alignment=ft.CrossAxisAlignment.STRETCH,
+            scroll=ft.ScrollMode.AUTO,
+            expand=True,
+            spacing=12,
+        ),
     )
 
     tabs = ft.Tabs(
@@ -687,13 +994,17 @@ def main(page: ft.Page):
         expand=True,
         content=ft.Column(
             expand=True,
+            spacing=0,
             controls=[
                 ft.TabBar(
+                    indicator_color=PRIMARY_COLOR,
+                    label_color=PRIMARY_COLOR,
+                    unselected_label_color=MUTED_COLOR,
                     tabs=[
                         ft.Tab(label="Шаблоны"),
                         ft.Tab(label="Верстка из файла"),
                         ft.Tab(label="Свой скрипт"),
-                    ]
+                    ],
                 ),
                 ft.TabBarView(
                     expand=True,
