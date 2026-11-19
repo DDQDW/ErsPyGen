@@ -1,0 +1,5 @@
+{
+  "name": "DocBuilder Mobile",
+  "description": "Mobile document generator for DOCX, PPTX, XLSX, and PDF documents with template builder and custom script runner.",
+  "requestFramePermissions": []
+}
