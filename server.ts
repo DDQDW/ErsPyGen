@@ -707,9 +707,26 @@ async function generateByFormat(
   throw new Error(`Неизвестный формат: ${String(format)}`);
 }
 
+function extractFencedCodeIfMarkdown(code: string): string {
+  const trimmed = code.trim();
+  const blocks: string[] = [];
+  const regex = /```(?:python|py|javascript|js)?\s*\n([\s\S]*?)```/gi;
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(trimmed)) !== null) {
+    if (match[1]?.trim()) {
+      blocks.push(match[1].trim());
+    }
+  }
+  if (blocks.length > 0 && /^(?:#|\s*```)/.test(trimmed)) {
+    return blocks.join('\n\n');
+  }
+  return code;
+}
+
 function preprocessScript(code: string): string {
+  const normalizedCode = extractFencedCodeIfMarkdown(code);
   // Convert Python triple-quoted strings ("""...""" and '''...''') into JS template literals
-  const withTripleQuotesConverted = code.replace(
+  const withTripleQuotesConverted = normalizedCode.replace(
     /"""([\s\S]*?)"""|'''([\s\S]*?)'''/g,
     (_m, d, s) => {
       const inner = String(d ?? s ?? '')
@@ -780,7 +797,7 @@ async function startServer() {
   app.use(express.json({ limit: '5mb' }));
 
   app.get('/api/health', (_req, res) => {
-    res.json({ status: 'ok', app: 'DocBuilder Mobile' });
+    res.json({ status: 'ok', app: 'PyDocx' });
   });
 
   app.post('/api/generate', async (req, res) => {

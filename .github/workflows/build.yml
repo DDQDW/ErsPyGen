@@ -1,4 +1,4 @@
-name: Build APK
+name: Build PyDocx
 
 on:
   push:
@@ -12,7 +12,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Build Flet APK
+      - name: Build Flet APK (arm64-v8a)
         id: build
         uses: flet-dev/flet-build-action@v1
         with:
@@ -20,11 +20,35 @@ jobs:
           runner-python-version: "3.12"
           bundled-python-version: "3.12"
           build-number: ${{ github.run_number }}
+          args: "--arch arm64-v8a"
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: DocBuilder-APK
+          name: PyDocx-APK
           path: ${{ steps.build.outputs.archive-path }}
+          archive: false
+          if-no-files-found: error
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build Flet Windows
+        id: build_win
+        uses: flet-dev/flet-build-action@v1
+        with:
+          target: windows
+          runner-python-version: "3.12"
+          bundled-python-version: "3.12"
+          build-number: ${{ github.run_number }}
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PyDocx-Windows
+          path: ${{ steps.build_win.outputs.archive-path }}
           archive: false
           if-no-files-found: error
