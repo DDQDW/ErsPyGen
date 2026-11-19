@@ -2,7 +2,6 @@
 
 **PyDocx** — кроссплатформенное приложение для **Android (`arm64-v8a`)** и **Windows**, созданное на Python и Flet. Позволяет выполнять собственные Python-скрипты и верстать готовые документы (`.docx`, `.pdf`, `.pptx`, `.xlsx`, `.md`, `.html`, `.txt`) прямо на телефоне или ПК.
 
-*(English description below)*
 
 ---
 
