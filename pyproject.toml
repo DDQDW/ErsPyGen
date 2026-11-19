@@ -5,6 +5,7 @@ description = "Mobile document generator"
 requires-python = ">=3.10"
 dependencies = [
     "flet==1.1.2",
+    "flet-permission-handler==1.1.2",
     "python-docx>=1.1.2",
     "python-pptx>=1.0.2",
     "openpyxl>=3.1.5",
@@ -18,11 +19,27 @@ dev = [
 ]
 
 [tool.flet]
-app_name = "DocBuilder"
-package_name = "com.example.docbuilder"
-product_name = "DocBuilder Mobile"
-company_name = "Example"
+org = "com.example"
+product = "DocBuilder Mobile"
+company = "Example"
 copyright = "Copyright (C) 2026 Example"
+
+[tool.flet.app]
+module = "main"
+exclude = [
+    "node_modules",
+    "dist",
+    "src",
+    "public",
+    "server.ts",
+    "package.json",
+    "package-lock.json",
+    "bun.lock",
+    "tsconfig.json",
+    "vite.config.ts",
+    "index.html",
+    "metadata.json",
+]
 
 [tool.flet.android]
 [tool.flet.android.permission]
